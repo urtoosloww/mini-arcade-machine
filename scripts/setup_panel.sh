@@ -11,6 +11,17 @@ if [ ! -f "$(dirname "$0")/../firmware/ili9341.bin" ]; then echo "firmware/ili93
 echo "==> Backing up config.txt to ${CFG}.bak"
 cp "$CFG" "${CFG}.bak"
 
+echo "==> Blacklisting the legacy fbtft drivers"
+# The overlay declares compatible = "ili9341", and the old fbtft driver
+# matches that string too -- and matches it first. It binds, fails on a
+# property the mipi-dbi overlay does not set, and the device is consumed:
+#     fb_ili9341 spi0.0: error -EINVAL: buswidth is not set
+cat > /etc/modprobe.d/blacklist-fbtft.conf <<'BL'
+blacklist fb_ili9341
+blacklist fbtft
+BL
+update-initramfs -u 2>/dev/null || true
+
 echo "==> Installing panel firmware to /lib/firmware/"
 cp "$(dirname "$0")/../firmware/ili9341.bin" /lib/firmware/
 
