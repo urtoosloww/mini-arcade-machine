@@ -4,10 +4,16 @@ A Raspberry Pi 5 arcade cabinet: a 320×240 SPI panel, an analog joystick
 read through a 16-bit ADC, four buttons, and a launcher that runs real
 Linux games on it.
 
-<!-- Add a photo of the build and a recording of the menu, then uncomment:
-![The cabinet](docs/images/cabinet.jpg)
-![Menu](docs/images/menu.gif)
--->
+<p align="center">
+  <img src="docs/images/cabinet.jpg" alt="The cabinet, showing the launcher menu on the SPI panel" width="470">
+  <img src="docs/images/menu.gif" alt="Menu, then SuperTux, njam, ninvaders and BurgerTime running on the panel" width="255">
+</p>
+
+<p align="center">
+  <sub>Left: the panel showing the launcher. Right: menu &rarr; SuperTux &rarr;
+  njam &rarr; ninvaders &rarr; BurgerTime, with the GPIO handed to the game
+  and reclaimed on exit each time.</sub>
+</p>
 
 The interesting part of this project is not the feature list. Most Pi
 display projects are a tutorial followed successfully; this one hit
