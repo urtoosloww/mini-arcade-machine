@@ -40,8 +40,6 @@ import pygame
 from smbus2 import SMBus
 from gpiozero import Button, Device
 
-import threading
-
 import padmap
 from btaudio import BTAudio
 
@@ -266,111 +264,74 @@ class Pad:
 # Process teardown
 # ---------------------------------------------------------------------------
 
-def x_env():
-    """Environment for xdotool / wmctrl, which talk to XWayland."""
-    env = wlr_env()
-    env.setdefault("DISPLAY", ":0")
-    if not env.get("DISPLAY"):
-        env["DISPLAY"] = ":0"
-    return env
-
-
-def force_fullscreen(names, timeout=10.0):
-    """Make a game's window fill the screen.
-
-    Several of these games open at a fixed size with no fullscreen
-    option of their own (xgalaga, burgerspace, njam...). They are X11
-    clients under XWayland, so the compositor will honour the EWMH
-    _NET_WM_STATE_FULLSCREEN hint even though the game never asks for
-    it. wmctrl sets that hint; xdotool finds the window.
-    """
-    if not shutil.which("wmctrl") or not shutil.which("xdotool"):
-        return False
-    env = x_env()
-    deadline = time.time() + timeout
-    wid = None
-    while time.time() < deadline and wid is None:
-        for name in names:
-            out = subprocess.run(
-                ["xdotool", "search", "--onlyvisible", "--name", name],
-                capture_output=True, text=True, env=env, timeout=6).stdout
-            ids = [i for i in out.split() if i.strip()]
-            if ids:
-                wid = ids[-1]
-                break
-            out = subprocess.run(
-                ["xdotool", "search", "--onlyvisible", "--class", name],
-                capture_output=True, text=True, env=env, timeout=6).stdout
-            ids = [i for i in out.split() if i.strip()]
-            if ids:
-                wid = ids[-1]
-                break
-        if wid is None:
-            time.sleep(0.4)
-
-    if wid is None:
-        # Fall back to whatever currently has focus -- games normally
-        # take focus as soon as they map their window.
-        out = subprocess.run(["xdotool", "getactivewindow"],
-                             capture_output=True, text=True, env=env,
-                             timeout=6).stdout.strip()
-        wid = out or None
-    if wid is None:
-        print("  fullscreen: no window found")
-        return False
-
-    for _ in range(3):
-        subprocess.run(["wmctrl", "-i", "-r", wid,
-                        "-b", "add,fullscreen"],
-                       capture_output=True, env=env, timeout=6)
-        subprocess.run(["xdotool", "windowactivate", wid],
-                       capture_output=True, env=env, timeout=6)
-        time.sleep(0.6)
-    print(f"  fullscreen applied to window {wid}")
-    return True
-
-
-def force_fullscreen(pid, tries=14, delay=0.7):
+def force_fullscreen(pid, hints=(), tries=14, delay=0.7):
     """Make a game's window fill the screen after it opens.
 
     Games open at whatever size they were built for, and their own
     fullscreen flags are inconsistent (OpenTyrian has none, xterm's is
-    ignored under XWayland). Rather than guess per game, ask the window
-    manager to fullscreen whatever window the process opened.
+    ignored under XWayland). Rather than special-case each one, ask the
+    window manager to fullscreen whatever window the process opened:
+    they are X11 clients under XWayland, so the compositor honours the
+    EWMH _NET_WM_STATE_FULLSCREEN hint even though the game never sets it.
 
-    Retried for a few seconds because a window may not exist yet, and
+    Windows are located by pid first, then by the name/class hints, then
+    by whatever holds focus -- games normally take focus as they map.
+    Retried for a few seconds because the window may not exist yet, and
     some games resize themselves shortly after mapping.
     """
+    if not (shutil.which("wmctrl") and shutil.which("xdotool")):
+        return None
+
+    def find_window(env):
+        for args in ([["xdotool", "search", "--pid", str(pid)]] if pid else []):
+            wid = _xdotool_last(args, env)
+            if wid:
+                return wid
+        for hint in hints:
+            for flag in ("--name", "--class"):
+                wid = _xdotool_last(
+                    ["xdotool", "search", "--onlyvisible", flag, hint], env)
+                if wid:
+                    return wid
+        return _xdotool_last(["xdotool", "getactivewindow"], env)
+
     def worker():
         seen = None
         for _ in range(tries):
             time.sleep(delay)
-            wid = ""
-            try:
-                out = subprocess.run(["xdotool", "search", "--pid", str(pid)],
-                                     capture_output=True, text=True,
-                                     timeout=5, env=wlr_env()).stdout
-                ids = [w for w in out.split() if w.strip()]
-                wid = ids[-1] if ids else ""
-            except Exception:
-                pass
+            env = wlr_env()
+            env.setdefault("DISPLAY", ":0")
+            wid = find_window(env)
             if not wid:
                 continue
             if wid != seen:
                 print(f"  fullscreening window {wid}")
                 seen = wid
-            e = wlr_env()
-            # EWMH fullscreen is what most window managers honour.
             for cmd in (["wmctrl", "-i", "-r", wid, "-b", "add,fullscreen"],
+                        ["xdotool", "windowactivate", wid],
                         ["xdotool", "windowsize", wid, "100%", "100%"],
                         ["xdotool", "windowmove", wid, "0", "0"]):
                 try:
-                    subprocess.run(cmd, capture_output=True, timeout=5, env=e)
+                    subprocess.run(cmd, capture_output=True, timeout=5, env=env)
                 except Exception:
                     pass
+        if seen is None:
+            print("  fullscreen: no window found")
+
     t = threading.Thread(target=worker, daemon=True)
     t.start()
     return t
+
+
+def _xdotool_last(args, env):
+    """Last window id printed by an xdotool call, or "" -- never raises."""
+    try:
+        out = subprocess.run(args, capture_output=True, text=True,
+                             timeout=6, env=env).stdout
+    except Exception:
+        return ""
+    ids = [w for w in out.split() if w.strip()]
+    return ids[-1] if ids else ""
 
 
 def kill_tree(proc, names, timeout=6.0):
@@ -455,9 +416,9 @@ def run_game(entry, pad):
         # Fullscreen the window once it appears. Terminal games already
         # get an explicit geometry, so they are skipped.
         if target != "xterm":
-            hints = [os.path.basename(cmd[0]), name.lower().split()[0]]
-            threading.Thread(target=force_fullscreen, args=(hints,),
-                             daemon=True).start()
+            force_fullscreen(game.pid,
+                             hints=[os.path.basename(cmd[0]),
+                                    name.lower().split()[0]])
 
         game.wait()
     except FileNotFoundError:
