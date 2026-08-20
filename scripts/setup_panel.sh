@@ -46,7 +46,9 @@ dtoverlay=mipi-dbi-spi,spi0-0,speed=48000000
 dtparam=compatible=ili9341\0panel-mipi-dbi-spi
 dtparam=write-only,cpha,cpol
 dtparam=width=320,height=240,width-mm=65,height-mm=49
-dtparam=reset-gpio=25,dc-gpio=24,backlight-gpio=18
+dtparam=reset-gpio=25,dc-gpio=24
+# No backlight-gpio. The backlight draws 60-80mA and a Pi 5 GPIO
+# sources about 16mA; it is wired to the 3.3V rail instead.
 # --- END T-ARCADE ---
 EOF
 
