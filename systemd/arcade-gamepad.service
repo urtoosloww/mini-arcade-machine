@@ -1,0 +1,14 @@
+[Unit]
+Description=Trax Arcade Panel - ADS1115 joystick + GPIO buttons to virtual gamepad
+After=multi-user.target
+Before=emulationstation.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/pi/arcade/arcade_gamepad.py
+Restart=on-failure
+RestartSec=3
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target
