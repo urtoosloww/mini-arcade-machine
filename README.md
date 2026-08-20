@@ -1,4 +1,4 @@
-# T-ARCADE
+# Mini Arcade Machine
 
 A Raspberry Pi 5 arcade cabinet: a 320×240 SPI panel, an analog joystick
 read through a 16-bit ADC, four buttons, and a launcher that runs real
@@ -10,7 +10,8 @@ Linux games on it.
 </p>
 
 <p align="center">
-  <sub>Left: the panel showing the launcher. Right: menu &rarr; SuperTux &rarr;
+  <sub>Left: the panel showing the launcher, which renders under its working
+  name, T-ARCADE &mdash; also the module name in <code>src/</code>. Right: menu &rarr; SuperTux &rarr;
   njam &rarr; ninvaders &rarr; BurgerTime, with the GPIO handed to the game
   and reclaimed on exit each time.</sub>
 </p>
@@ -54,8 +55,8 @@ sudo apt install python3-pygame python3-evdev python3-smbus2 \
                  python3-gpiozero python3-lgpio \
                  wlr-randr wmctrl xdotool xterm
 
-git clone https://github.com/<you>/t-arcade.git
-cd t-arcade
+git clone https://github.com/urtoosloww/mini-arcade-machine.git
+cd mini-arcade-machine
 
 # 1. Panel: blacklist fbtft, install the init blob, write the overlay.
 sudo bash scripts/setup_panel.sh
