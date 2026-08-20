@@ -223,6 +223,11 @@ Stated plainly, because they are structural rather than unfinished work.
   or more inputs. The Start+Select combination is already spoken for.
 - **The backlight is not dimmable** after the GPIO18 fix. It is wired
   straight to 3.3 V. A MOSFET would restore control.
+- **The enclosure is not reusable.** The cabinet is printed as a single part,
+  and the joystick and button cutouts are positioned for exactly where those
+  components sit in this build. The model is not included: adapting it to
+  different hardware means re-cutting those features, which is more work than
+  starting from a new box.
 - **Wayland only.** X11 cannot see the panel at all
   ([Bug 6](docs/DEBUGGING.md#bug-6-x11-vs-wayland-on-secondary-drm-devices)).
 - **An HDMI display would have been easier.** A 4–5" HDMI panel costs about
