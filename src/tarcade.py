@@ -32,7 +32,12 @@ import sys
 import threading
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+for _p in (_HERE, _ROOT):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 os.environ["SDL_AUDIODRIVER"] = "dummy"      # never hold the audio device
 
@@ -40,23 +45,16 @@ import pygame
 from smbus2 import SMBus
 from gpiozero import Button, Device
 
+import config
 import padmap
 from btaudio import BTAudio
 
-W, H, FPS = 320, 240, 30
-DIR = os.path.dirname(os.path.abspath(__file__))
+W, H, FPS = config.PANEL_W, config.PANEL_H, config.FPS
 
-BLACK = (10, 8, 16)
-WHITE = (238, 238, 240)
-GREY = (105, 105, 122)
-DIM = (60, 60, 76)
-RED = (232, 62, 52)
-AMBER = (250, 176, 46)
-CYAN = (68, 212, 236)
-GREEN = (86, 216, 108)
-PINK = (238, 104, 186)
+BLACK, WHITE, GREY, DIM = config.BLACK, config.WHITE, config.GREY, config.DIM
+RED, AMBER, CYAN = config.RED, config.AMBER, config.CYAN
+GREEN, PINK = config.GREEN, config.PINK
 
-WAD = "/usr/share/games/doom/freedoom1.wad"
 
 # ---------------------------------------------------------------------------
 # Terminal games
@@ -68,16 +66,6 @@ WAD = "/usr/share/games/doom/freedoom1.wad"
 # grid is computed from the live screen resolution and passed as an
 # explicit -geometry instead.
 
-TERM_FONT = "DejaVu Sans Mono"
-TERM_MIN_COLS = 80
-TERM_MIN_ROWS = 24
-
-# DejaVu Sans Mono advances 0.602 em; at 96 dpi an Xft size of S points
-# gives a cell roughly S * (96/72) * 0.602 = S * 0.803 px wide.
-_CELL_W_PER_PT = 0.803
-_CELL_H_PER_PT = 1.70
-
-
 def active_screen_size():
     """Resolution of whichever output is currently enabled."""
     try:
@@ -85,6 +73,11 @@ def active_screen_size():
                                       stderr=subprocess.DEVNULL, timeout=5)
     except Exception:
         return (W, H)
+    return parse_active_mode(out) or (W, H)
+
+
+def parse_active_mode(out):
+    """Pull (width, height) of the first enabled output out of wlr-randr."""
     name = None
     info = {}
     for line in out.splitlines():
@@ -104,30 +97,52 @@ def active_screen_size():
                 return (int(sw), int(sh))
             except ValueError:
                 pass
-    return (W, H)
+    return None
+
+
+def term_geometry(screen_w, screen_h, min_cols=None, min_rows=None):
+    """Font size and character grid that fill a screen of this size.
+
+    Pure arithmetic, kept separate from term() so it can be checked at
+    320x240, 640x480 and 1080p without an X server. Returns
+    (font_points, cols, rows). The font is chosen so the *minimum* grid
+    fits, then the actual grid is whatever that font size yields -- which
+    is at least the minimum and usually more.
+    """
+    cols_min = min_cols or config.TERM_MIN_COLS
+    rows_min = min_rows or config.TERM_MIN_ROWS
+    cw, chh = config.TERM_CELL_W_PER_PT, config.TERM_CELL_H_PER_PT
+
+    size = max(config.TERM_MIN_FONT_PT,
+               int(min(screen_w / (cols_min * cw),
+                       screen_h / (rows_min * chh))))
+    cols = max(cols_min, int(screen_w / (size * cw)))
+    rows = max(rows_min, int(screen_h / (size * chh)))
+    return size, cols, rows
 
 
 def term(binary, min_cols=None, min_rows=None):
     """Build an xterm argv that fills the active screen."""
-    cols_min = min_cols or TERM_MIN_COLS
-    rows_min = min_rows or TERM_MIN_ROWS
     sw, sh = active_screen_size()
-
-    size = max(3, int(min(sw / (cols_min * _CELL_W_PER_PT),
-                          sh / (rows_min * _CELL_H_PER_PT))))
-    cols = max(cols_min, int(sw / (size * _CELL_W_PER_PT)))
-    rows = max(rows_min, int(sh / (size * _CELL_H_PER_PT)))
+    size, cols, rows = term_geometry(sw, sh, min_cols, min_rows)
 
     print(f"  {os.path.basename(binary)}: screen {sw}x{sh} -> "
-          f"{size}pt -> {cols}x{rows} chars (needs {cols_min}x{rows_min})")
+          f"{size}pt -> {cols}x{rows} chars "
+          f"(needs {min_cols or config.TERM_MIN_COLS}x"
+          f"{min_rows or config.TERM_MIN_ROWS})")
 
-    return ["/usr/bin/xterm",
-            "-fa", TERM_FONT,
+    return [config.XTERM,
+            "-fa", config.TERM_FONT,
             "-fs", str(size),
             "-geometry", f"{cols}x{rows}+0+0",
             "+sb", "-b", "0", "-bw", "0",
             "-bg", "black", "-fg", "white",
             "-e", binary]
+
+
+def game(name):
+    """Absolute path to an installed game binary."""
+    return os.path.join(config.GAMES_DIR, name)
 
 
 def have(path):
@@ -136,34 +151,37 @@ def have(path):
 
 POWER_OFF = "__poweroff__"
 MONITOR_ON = "__monitoron__"
-AUDIO_DEV  = "__audiodev__"
+AUDIO_DEV = "__audiodev__"
 
 # name, argv, key profile, colour, availability test, env, extra kill names
 # argv is a command list, or a ("TERM", binary[, cols, rows]) marker that
 # resolve() expands at launch time.
 GAMES = [
-    ("DOOM",       ["/usr/games/chocolate-doom", "-iwad", WAD, "-fullscreen"],
-     "doom", RED, lambda: os.path.exists(WAD), {}),
-    ("OPENTYRIAN", ["/usr/games/opentyrian"],
+    ("DOOM",       [game("chocolate-doom"), "-iwad", config.DOOM_WAD,
+                    "-fullscreen"],
+     "doom", RED, have(config.DOOM_WAD), {}),
+    ("OPENTYRIAN", [game("opentyrian")],
      "shooter", CYAN, None, {}),
-    ("NJAM",       ["/usr/games/njam"],
+    # njam picks the Wayland SDL backend and comes up as a blank window;
+    # forcing x11 puts it back on XWayland where it renders.
+    ("NJAM",       [game("njam")],
      "menu", PINK, None, {"SDL_VIDEODRIVER": "x11"}),
-    ("SUPERTUX",   ["/usr/games/supertux2", "--fullscreen",
-                    "--geometry", "320x240"],
-     "platform", GREEN, have("/usr/games/supertux2"), {}),
+    ("SUPERTUX",   [game("supertux2"), "--fullscreen",
+                    "--geometry", f"{W}x{H}"],
+     "platform", GREEN, have(game("supertux2")), {}),
 
-    ("BURGERTIME", ["/usr/games/burgerspace"],
-     "shooter", AMBER, have("/usr/games/burgerspace"), {}),
-    ("XGALAGA",    ["/usr/games/xgalaga", "-geometry", "320x240+0+0"],
-     "shooter", CYAN, have("/usr/games/xgalaga"), {}),
-    ("CHROMIUM BSU", ["/usr/games/chromium-bsu"],
-     "shooter", GREEN, have("/usr/games/chromium-bsu"), {}),
+    ("BURGERTIME", [game("burgerspace")],
+     "shooter", AMBER, have(game("burgerspace")), {}),
+    ("XGALAGA",    [game("xgalaga"), "-geometry", f"{W}x{H}+0+0"],
+     "shooter", CYAN, have(game("xgalaga")), {}),
+    ("CHROMIUM BSU", [game("chromium-bsu")],
+     "shooter", GREEN, have(game("chromium-bsu")), {}),
 
     # ncurses games, run inside xterm
-    ("NINVADERS",  ("TERM", "/usr/games/ninvaders"),
-     "shooter", GREEN, have("/usr/games/ninvaders"), {}, ["ninvaders"]),
-    ("BASTET",     ("TERM", "/usr/games/bastet"),
-     "shooter", CYAN, have("/usr/games/bastet"), {}, ["bastet"]),
+    ("NINVADERS",  ("TERM", game("ninvaders")),
+     "shooter", GREEN, have(game("ninvaders")), {}, ["ninvaders"]),
+    ("BASTET",     ("TERM", game("bastet")),
+     "shooter", CYAN, have(game("bastet")), {}, ["bastet"]),
 ]
 
 
@@ -185,7 +203,7 @@ def available(entry):
     if cmd in (POWER_OFF, MONITOR_ON, AUDIO_DEV):
         return True
     if isinstance(cmd, tuple) and cmd and cmd[0] == "TERM":
-        return os.path.exists(cmd[1]) and os.path.exists("/usr/bin/xterm")
+        return os.path.exists(cmd[1]) and os.path.exists(config.XTERM)
     if test is not None:
         return test()
     if cmd[0].startswith("/"):
@@ -201,7 +219,7 @@ def real_user():
     if v and v != "root":
         return v
     try:
-        return pwd.getpwuid(os.stat(DIR).st_uid).pw_name
+        return pwd.getpwuid(os.stat(_ROOT).st_uid).pw_name
     except Exception:
         return getpass.getuser()
 
@@ -217,7 +235,7 @@ class Pad:
     """Joystick + buttons, read straight from the hardware."""
 
     def __init__(self):
-        self.bus = SMBus(1)
+        self.bus = SMBus(config.I2C_BUS)
         self.btn = {}
         self.open_pins()
         self.ch, self.cv = padmap.calibrate(self.bus)
@@ -225,13 +243,16 @@ class Pad:
 
     def open_pins(self):
         for name, pin in padmap.BTN_PINS.items():
-            self.btn[name] = Button(pin, pull_up=True, bounce_time=0.02)
+            self.btn[name] = Button(pin, pull_up=True,
+                                    bounce_time=config.BUTTON_BOUNCE_MENU)
 
     def release_pins(self):
         """Fully free the GPIO so the input bridge can claim it.
 
         Button.close() is not enough: gpiozero's lgpio backend holds the
-        chip handle at the factory level, leaving pins busy.
+        chip handle at the factory level, leaving pins busy. The bridge
+        then dies with lgpio.error: 'GPIO busy' and the game runs with
+        no controls.
         """
         for b in self.btn.values():
             try:
@@ -261,7 +282,7 @@ class Pad:
 
 
 # ---------------------------------------------------------------------------
-# Process teardown
+# Process lifecycle
 # ---------------------------------------------------------------------------
 
 def force_fullscreen(pid, hints=(), tries=14, delay=0.7):
@@ -278,6 +299,8 @@ def force_fullscreen(pid, hints=(), tries=14, delay=0.7):
     by whatever holds focus -- games normally take focus as they map.
     Retried for a few seconds because the window may not exist yet, and
     some games resize themselves shortly after mapping.
+
+    Runs on a daemon thread and returns it; failure is logged, never raised.
     """
     if not (shutil.which("wmctrl") and shutil.which("xdotool")):
         return None
@@ -334,12 +357,17 @@ def _xdotool_last(args, env):
     return ids[-1] if ids else ""
 
 
-def kill_tree(proc, names, timeout=6.0):
+def kill_tree(proc, names, timeout=None, _sleep=time.sleep):
     """Terminate a game and everything it spawned.
 
     Escalating: SIGTERM the process group so the game can save, SIGKILL
     the group if it survives, then sweep by name until pgrep is clean.
+    The name sweep matters because several of these games re-exec or
+    fork a helper that is not in the original process group -- killing
+    only the group leaves a window on screen over the menu.
     """
+    timeout = config.KILL_TIMEOUT if timeout is None else timeout
+
     if proc is not None and proc.poll() is None:
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
@@ -350,7 +378,7 @@ def kill_tree(proc, names, timeout=6.0):
                 pass
         deadline = time.time() + timeout
         while time.time() < deadline and proc.poll() is None:
-            time.sleep(0.15)
+            _sleep(0.15)
         if proc.poll() is None:
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -365,17 +393,17 @@ def kill_tree(proc, names, timeout=6.0):
             pass
 
     for name in names:
-        for attempt in range(12):
+        for attempt in range(config.KILL_SWEEP_TRIES):
             alive = subprocess.call(["pgrep", "-f", name],
                                     stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL) == 0
             if not alive:
                 break
-            subprocess.call(["pkill", "-TERM" if attempt < 3 else "-KILL",
-                             "-f", name],
+            sig = "-TERM" if attempt < config.KILL_SWEEP_TERM_TRIES else "-KILL"
+            subprocess.call(["pkill", sig, "-f", name],
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL)
-            time.sleep(0.35)
+            _sleep(config.KILL_SWEEP_INTERVAL)
         else:
             print(f"warning: {name} still running after cleanup")
 
@@ -392,17 +420,18 @@ def run_game(entry, pad):
         extra_kill.append(os.path.basename(cmd[cmd.index("-e") + 1]))
 
     pad.release_pins()
-    time.sleep(1.0)
+    time.sleep(config.GPIO_HANDOFF_DELAY)
 
-    bridge = game = None
+    bridge = proc = None
     try:
         bridge = subprocess.Popen(
-            ["sudo", "python3", os.path.join(DIR, "arcade_input.py"),
+            ["sudo", config.PYTHON,
+             os.path.join(config.SRC_DIR, "arcade_input.py"),
              "--profile", profile, "--quit-target", target],
-            stdout=open("/tmp/bridge.log", "w"),
+            stdout=open(config.BRIDGE_LOG, "w"),
             stderr=subprocess.STDOUT,
             start_new_session=True)
-        time.sleep(2.5)
+        time.sleep(config.BRIDGE_START_DELAY)
 
         env = dict(os.environ)
         env.update(extra_env)
@@ -411,24 +440,23 @@ def run_game(entry, pad):
             print(f"env: {extra_env}")
 
         argv = cmd if os.geteuid() != 0 else ["sudo", "-u", USER, "-E"] + cmd
-        game = subprocess.Popen(argv, env=env, start_new_session=True)
+        proc = subprocess.Popen(argv, env=env, start_new_session=True)
 
-        # Fullscreen the window once it appears. Terminal games already
-        # get an explicit geometry, so they are skipped.
+        # Terminal games already get an explicit geometry, so skip them.
         if target != "xterm":
-            force_fullscreen(game.pid,
+            force_fullscreen(proc.pid,
                              hints=[os.path.basename(cmd[0]),
                                     name.lower().split()[0]])
 
-        game.wait()
+        proc.wait()
     except FileNotFoundError:
         print(f"{cmd[0]} not installed")
     except Exception as err:
         print(f"launch error: {err}")
     finally:
-        kill_tree(game, [target] + extra_kill)
+        kill_tree(proc, [target] + extra_kill)
         kill_tree(bridge, ["arcade_input.py"])
-        time.sleep(1.2)
+        time.sleep(config.GPIO_RECLAIM_DELAY)
         try:
             pad.open_pins()
         except Exception as err:
@@ -465,26 +493,27 @@ def draw_menu(c, items, sel, frame, launching, confirm_off, off_hold):
     hue = (frame * 2) % 360
     col = pygame.Color(0)
     col.hsva = (hue, 72, 100, 100)
-    text(c, "T-ARCADE", W // 2, 26, col, 40, center=True)
+    text(c, "T-ARCADE", W // 2, 26, col, config.FONT_TITLE, center=True)
     pygame.draw.line(c, DIM, (24, 44), (W - 24, 44))
 
     if not items:
         text(c, "NO GAMES INSTALLED", W // 2, 110, GREY, 20, center=True)
         return
 
-    top = max(0, min(sel - 2, len(items) - 6))
-    for i, row in enumerate(items[top:top + 6]):
+    rows = config.MENU_VISIBLE_ROWS
+    top = max(0, min(sel - 2, len(items) - rows))
+    for i, row in enumerate(items[top:top + rows]):
         idx = top + i
         y = 60 + i * 22
         name, accent = row[0], row[3]
         if idx == sel:
             pygame.draw.rect(c, (28, 28, 44), (18, y - 3, W - 36, 20))
             pygame.draw.rect(c, accent, (18, y - 3, 3, 20))
-            text(c, name, 32, y, accent, 20)
+            text(c, name, 32, y, accent, config.FONT_ROW)
         else:
-            text(c, name, 32, y, GREY, 18)
+            text(c, name, 32, y, GREY, config.FONT_ROW_DIM)
 
-    if len(items) > 6:
+    if len(items) > rows:
         text(c, f"{sel + 1}/{len(items)}", W - 26, 200, DIM, 14, center=True)
 
     if confirm_off:
@@ -499,17 +528,16 @@ def draw_menu(c, items, sel, frame, launching, confirm_off, off_hold):
     else:
         pygame.draw.line(c, DIM, (24, 206), (W - 24, 206))
         if (frame // 14) % 2:
-            text(c, "A = PLAY", W // 2, 218, WHITE, 18, center=True)
-        else:
-            text(c, "HOLD START = POWER OFF", W // 2, 218, GREY, 15,
+            text(c, "A = PLAY", W // 2, 218, WHITE, config.FONT_ROW_DIM,
                  center=True)
+        else:
+            text(c, "HOLD START = POWER OFF", W // 2, 218, GREY,
+                 config.FONT_SMALL, center=True)
 
     if off_hold > 0:
-        frac = min(1.0, off_hold / (FPS * 3))
+        frac = min(1.0, off_hold / (FPS * config.POWEROFF_HOLD_SECS))
         pygame.draw.rect(c, RED, (0, H - 4, int(W * frac), 4))
 
-
-# ---------------------------------------------------------------------------
 
 def draw_bt(c, bt, sel, frame):
     """Bluetooth speaker picker."""
@@ -518,18 +546,20 @@ def draw_bt(c, bt, sel, frame):
     pygame.draw.line(c, DIM, (24, 36), (W - 24, 36))
 
     devs = bt.devices
+    rows = config.MENU_VISIBLE_ROWS
     if bt.busy:
         dots = "." * (1 + (frame // 8) % 3)
         text(c, bt.status.rstrip(".") + dots, W // 2, 110, AMBER, 18,
              center=True)
     elif not devs:
         text(c, "NO DEVICES FOUND", W // 2, 100, GREY, 18, center=True)
-        text(c, "Put the speaker in pairing mode", W // 2, 122, DIM, 13,
+        text(c, "Put the speaker in pairing mode", W // 2, 122, DIM,
+             config.FONT_TINY, center=True)
+        text(c, "then press B to scan", W // 2, 138, DIM, config.FONT_TINY,
              center=True)
-        text(c, "then press B to scan", W // 2, 138, DIM, 13, center=True)
     else:
-        top = max(0, min(sel - 2, len(devs) - 6))
-        for i, (mac, name, conn) in enumerate(devs[top:top + 6]):
+        top = max(0, min(sel - 2, len(devs) - rows))
+        for i, (mac, name, conn) in enumerate(devs[top:top + rows]):
             idx = top + i
             y = 48 + i * 20
             label = (name or mac)[:26]
@@ -543,18 +573,23 @@ def draw_bt(c, bt, sel, frame):
                 text(c, "*", W - 24, y, GREEN, 17)
 
     if bt.status and not bt.busy:
-        text(c, bt.status[:38], W // 2, 186, WHITE, 13, center=True)
+        text(c, bt.status[:38], W // 2, 186, WHITE, config.FONT_TINY,
+             center=True)
 
     pygame.draw.line(c, DIM, (24, 198), (W - 24, 198))
     if bt.busy:
         text(c, "SELECT = BACK", W // 2, 212, CYAN, 16, center=True)
     elif (frame // 14) % 2:
-        text(c, "A = CONNECT   B = SCAN", W // 2, 212, WHITE, 15,
-             center=True)
+        text(c, "A = CONNECT   B = SCAN", W // 2, 212, WHITE,
+             config.FONT_SMALL, center=True)
     else:
-        text(c, "SELECT = BACK TO ARCADE", W // 2, 212, CYAN, 15,
-             center=True)
+        text(c, "SELECT = BACK TO ARCADE", W // 2, 212, CYAN,
+             config.FONT_SMALL, center=True)
 
+
+# ---------------------------------------------------------------------------
+# Display management
+# ---------------------------------------------------------------------------
 
 def wlr_env():
     """Environment wlr-randr needs, rebuilt rather than inherited.
@@ -593,13 +628,29 @@ def wlr(*args, timeout=10):
         return subprocess.CompletedProcess(args, 1, "", str(err))
 
 
-def enable_output(name):
+def preferred_mode(out, name):
+    """The mode wlr-randr marks 'preferred' for one output, or None."""
+    seen = False
+    for line in out.splitlines():
+        if line and line[0].isalpha():
+            seen = line.split()[0] == name
+        elif seen and "preferred" in line:
+            return line.strip().split()[0]
+    return None
+
+
+def enable_output(name, _run=None):
     """Turn an output back on, escalating through what wlr-randr accepts.
 
     A bare --on is often refused with "could not apply config" after the
-    output has been disabled, so fall back to naming its preferred mode
-    and then to placing it at the origin.
+    output has been disabled, so fall back to naming its preferred mode,
+    then to placing it at the origin, and finally to describing the whole
+    layout in one call -- which succeeds where an incremental change is
+    rejected, because the compositor validates the result as a whole.
+
+    _run is the wlr-randr runner, injected by the tests.
     """
+    run = _run or wlr
     if not name:
         return False, "no output"
 
@@ -607,27 +658,18 @@ def enable_output(name):
 
     mode = None
     try:
-        out = wlr(timeout=6).stdout
-        seen = False
-        for line in out.splitlines():
-            if line and line[0].isalpha():
-                seen = line.split()[0] == name
-            elif seen and "preferred" in line:
-                mode = line.strip().split()[0]
-                break
+        mode = preferred_mode(run(timeout=6).stdout, name)
     except Exception:
         pass
     if mode:
         attempts.append(["--output", name, "--on", "--mode", mode])
     attempts.append(["--output", name, "--on", "--pos", "0,0"])
-    # Describing the whole layout in one call often succeeds where an
-    # incremental change is rejected.
     attempts.append(["--output", name, "--on", "--pos", "0,0",
-                     "--output", "SPI-1", "--pos", "1920,0"])
+                     "--output", "SPI-1", "--pos", config.PANEL_LAYOUT_POS])
 
     last = ""
     for cmd in attempts:
-        r = wlr(*cmd)
+        r = run(*cmd)
         if r.returncode == 0:
             return True, " ".join(cmd[2:]) or "--on"
         msg = (r.stderr or r.stdout or "").strip().splitlines()
@@ -635,15 +677,17 @@ def enable_output(name):
     return False, last[:40]
 
 
-def find_outputs():
-    out = wlr(timeout=8).stdout
+def find_outputs(_run=None):
+    """(monitor, panel) output names as the compositor reports them."""
+    run = _run or wlr
+    out = run(timeout=8).stdout
     if not out:
         return None, None
     big = panel = None
     for line in out.splitlines():
         if line and line[0].isalpha():
             name = line.split()[0]
-            if "SPI" in name.upper():
+            if config.PANEL_OUTPUT_MATCH in name.upper():
                 panel = name
             elif big is None:
                 big = name
@@ -655,6 +699,10 @@ def safe_shutdown():
     subprocess.call(["sync"])
     subprocess.call(["systemctl", "poweroff"])
 
+
+# ---------------------------------------------------------------------------
+# Main loop
+# ---------------------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(description="T-ARCADE")
@@ -671,10 +719,13 @@ def main():
 
     big = None
     if not args.monitor:
+        # The panel cannot be targeted directly under Wayland, so it
+        # becomes the only output instead: disable HDMI and fullscreen
+        # lands on the panel with no positioning needed.
         big, _panel = find_outputs()
         if big:
             wlr("--output", big, "--off")
-            time.sleep(1.5)
+            time.sleep(config.MONITOR_OFF_SETTLE)
 
     def restore():
         if big:
@@ -736,61 +787,61 @@ def main():
             hit = lambda k: s[k] and not prev.get(k)
 
             if bt_screen:
-              try:
-                # A pair/connect failure must never take the launcher
-                # down -- report it on screen and stay in the menu.
-                if bt_done_msg > 0:
-                    bt_done_msg -= 1
-                    if bt_done_msg == 0:
+                try:
+                    # A pair/connect failure must never take the launcher
+                    # down -- report it on screen and stay in the menu.
+                    if bt_done_msg > 0:
+                        bt_done_msg -= 1
+                        if bt_done_msg == 0:
+                            bt_screen = False
+                    # Select works even while scanning, so this screen is
+                    # never a place you can get stuck.
+                    if hit("select"):
                         bt_screen = False
-                # Select works even while scanning, so the screen is
-                # never a place you can get stuck.
-                if hit("select"):
-                    bt_screen = False
-                elif not bt.busy:
-                    if hit("up") and bt.devices:
-                        bt_sel = (bt_sel - 1) % len(bt.devices)
-                    if hit("down") and bt.devices:
-                        bt_sel = (bt_sel + 1) % len(bt.devices)
-                    if hit("a") and bt.devices:
-                        mac, nm, conn = bt.devices[bt_sel]
-                        if conn:
-                            bt.disconnect(mac)
-                        else:
-                            bt.connect(mac, nm)
-                        bt_waiting = True
-                    if hit("b"):
-                        bt.scan()
-                    if hit("start"):
-                        bt_screen = False
-                if bt_waiting and not bt.busy:
-                    bt_waiting = False
-                    bt_ok = "connect" in bt.status.lower() and \
-                            "fail" not in bt.status.lower()
-                    bt_ok = bt_ok or bt.status.lower().startswith("connected")
-                    bt_done_msg = FPS * 2
+                    elif not bt.busy:
+                        if hit("up") and bt.devices:
+                            bt_sel = (bt_sel - 1) % len(bt.devices)
+                        if hit("down") and bt.devices:
+                            bt_sel = (bt_sel + 1) % len(bt.devices)
+                        if hit("a") and bt.devices:
+                            mac, nm, conn = bt.devices[bt_sel]
+                            if conn:
+                                bt.disconnect(mac)
+                            else:
+                                bt.connect(mac, nm)
+                            bt_waiting = True
+                        if hit("b"):
+                            bt.scan()
+                        if hit("start"):
+                            bt_screen = False
+                    if bt_waiting and not bt.busy:
+                        bt_waiting = False
+                        st = bt.status.lower()
+                        bt_ok = ("connect" in st and "fail" not in st) or \
+                                st.startswith("connected")
+                        bt_done_msg = FPS * 2
 
-                draw_bt(canvas, bt, bt_sel, frame)
-                if bt_done_msg > 0:
-                    col = GREEN if bt_ok else RED
-                    msg = "PAIR SUCCESSFUL" if bt_ok else "PAIR FAILED"
-                    pygame.draw.rect(canvas, BLACK, (26, 96, W - 52, 44))
-                    pygame.draw.rect(canvas, col, (26, 96, W - 52, 44), 1)
-                    text(canvas, msg, W // 2, 112, col, 22, center=True)
-                    text(canvas, bt.status[:34], W // 2, 132, WHITE, 12,
-                         center=True)
-                screen.blit(canvas, (0, 0))
-                pygame.display.flip()
-                prev = s
-                frame += 1
-                clock.tick(FPS)
-                continue
-              except Exception as err:
-                print(f"bluetooth screen error: {err}")
-                bt.status = str(err)[:36]
-                bt_screen = False
-                bt_waiting = False
-                bt_done_msg = 0
+                    draw_bt(canvas, bt, bt_sel, frame)
+                    if bt_done_msg > 0:
+                        col = GREEN if bt_ok else RED
+                        msg = "PAIR SUCCESSFUL" if bt_ok else "PAIR FAILED"
+                        pygame.draw.rect(canvas, BLACK, (26, 96, W - 52, 44))
+                        pygame.draw.rect(canvas, col, (26, 96, W - 52, 44), 1)
+                        text(canvas, msg, W // 2, 112, col, 22, center=True)
+                        text(canvas, bt.status[:34], W // 2, 132, WHITE, 12,
+                             center=True)
+                    screen.blit(canvas, (0, 0))
+                    pygame.display.flip()
+                    prev = s
+                    frame += 1
+                    clock.tick(FPS)
+                    continue
+                except Exception as err:
+                    print(f"bluetooth screen error: {err}")
+                    bt.status = str(err)[:36]
+                    bt_screen = False
+                    bt_waiting = False
+                    bt_done_msg = 0
 
             if confirm_off:
                 if hit("a"):
@@ -826,19 +877,19 @@ def main():
                     else:
                         launching = 1
 
-                # hold Start 3s -> shutdown prompt
+                # hold Start -> shutdown prompt
                 if s["start"]:
                     off_hold += 1
-                    if off_hold > FPS * 3:
+                    if off_hold > FPS * config.POWEROFF_HOLD_SECS:
                         confirm_off = True
                         off_hold = 0
                 else:
                     off_hold = 0
 
-                # hold Select 2s -> exit to desktop
+                # hold Select -> exit to desktop
                 if s["select"] and not s["start"]:
                     sel_hold += 1
-                    if sel_hold > FPS * 2:
+                    if sel_hold > FPS * config.EXIT_HOLD_SECS:
                         running = False
                 else:
                     sel_hold = 0
@@ -856,15 +907,20 @@ def main():
             pygame.display.flip()
 
             if launching:
+                # A few frames of LOADING... before the game starts, so
+                # the press is acknowledged before the screen goes dark.
                 launching += 1
                 if launching > 8:
                     launching = 0
                     run_game(items[sel], pad)
                     try:
                         pygame.display.quit()
-                        time.sleep(0.4)
+                        time.sleep(config.DISPLAY_REBUILD_DELAY)
                         pygame.display.init()
                         pygame.font.init()
+                        # font.quit() invalidates every Font object, so
+                        # the cache has to go too or the next render
+                        # segfaults on a dangling handle.
                         _fonts.clear()
                         screen = make_display()
                     except Exception as err:

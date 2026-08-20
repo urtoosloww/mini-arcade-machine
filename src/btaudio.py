@@ -19,11 +19,20 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 
-LAST_DEVICE = os.path.expanduser("~/.tarcade_btaudio.json")
-SCAN_SECS = 10
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+for _p in (_HERE, _ROOT):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+import config
+
+LAST_DEVICE = config.BT_STATE_FILE
+SCAN_SECS = config.BT_SCAN_SECS
 
 
 def _run(args, timeout=20):
@@ -121,7 +130,7 @@ class BTAudio:
         named = sum(1 for d in self.devices if d[1] != "(unnamed)")
         self.status = f"{len(self.devices)} found, {named} named"
 
-    def refresh(self, deep=True, max_lookups=14):
+    def refresh(self, deep=True, max_lookups=None):
         """Rebuild the device list.
 
         Names come from three places, in order of reliability: what the
@@ -130,6 +139,8 @@ class BTAudio:
         Audio devices sort to the top so speakers are easy to find among
         the phones and watches that also answer a scan.
         """
+        max_lookups = (config.BT_MAX_INFO_LOOKUPS
+                       if max_lookups is None else max_lookups)
         out = _bt("devices", timeout=10)
         connected = _bt("devices", "Connected", timeout=10)
         conn_macs = set(m.upper() for m in

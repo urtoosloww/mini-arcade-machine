@@ -2,51 +2,59 @@
 # start_arcade.sh -- launch T-ARCADE, intended for autostart at login.
 #
 # Runs inside the desktop session (not a system service) because the
-# launcher needs WAYLAND_DISPLAY and XDG_RUNTIME_DIR to drive wlr-randr.
+# launcher needs WAYLAND_DISPLAY and XDG_RUNTIME_DIR to drive wlr-randr,
+# and a system unit starts before any compositor exists.
 #
-#   bash start_arcade.sh          normal launch
-#   bash start_arcade.sh --setup  install autostart + passwordless sudo
-#   bash start_arcade.sh --remove undo the autostart
+#   bash scripts/start_arcade.sh          normal launch
+#   bash scripts/start_arcade.sh --setup  install autostart + sudoers rule
+#   bash scripts/start_arcade.sh --remove undo the autostart
 #
-# Escape hatch: create ~/arcade/DISABLE and the arcade will not start at
-# boot. Handy if it ever comes up broken and you need the desktop back.
+# Escape hatch: create a DISABLE file in the repo root and the arcade
+# will not start at boot. Handy if it ever comes up broken and you need
+# the desktop back.
 
-DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+SRC="$REPO/src"
 USERNAME="$(id -un)"
+PYTHON=/usr/bin/python3
 LOG=/tmp/tarcade_boot.log
+COMPOSITOR_WAIT=30      # seconds to wait for the compositor at boot
+PANEL_SETTLE=3          # seconds after that, for the panel to come up
 
 # ---------------------------------------------------------------- setup ---
 if [ "${1:-}" = "--setup" ]; then
     echo "==> Passwordless sudo for the arcade scripts"
-    # Only these two commands, not blanket sudo access.
+    # Scoped to these three command lines, not blanket sudo access.
     SUDOERS=/etc/sudoers.d/tarcade
-    # SETENV is required, otherwise `sudo -E` is refused with
-    # "sorry, you are not allowed to preserve the environment" -- and the
-    # launcher needs WAYLAND_DISPLAY/XDG_RUNTIME_DIR to drive wlr-randr.
-    sudo tee "$SUDOERS" > /dev/null <<EOF
-$USERNAME ALL=(ALL) NOPASSWD:SETENV: /usr/bin/python3 $DIR/tarcade.py
-$USERNAME ALL=(ALL) NOPASSWD:SETENV: /usr/bin/python3 $DIR/tarcade.py *
-$USERNAME ALL=(ALL) NOPASSWD:SETENV: /usr/bin/python3 $DIR/arcade_input.py *
-EOF
+    # SETENV is required. Without it `sudo -E` is refused with
+    # "sorry, you are not allowed to preserve the environment", and the
+    # launcher loses WAYLAND_DISPLAY/XDG_RUNTIME_DIR -- which means
+    # wlr-randr cannot reach the compositor and the HDMI output never
+    # comes back. See docs/DEBUGGING.md, Bug 8.
+    sudo tee "$SUDOERS" > /dev/null <<SUDO
+$USERNAME ALL=(ALL) NOPASSWD:SETENV: $PYTHON $SRC/tarcade.py
+$USERNAME ALL=(ALL) NOPASSWD:SETENV: $PYTHON $SRC/tarcade.py *
+$USERNAME ALL=(ALL) NOPASSWD:SETENV: $PYTHON $SRC/arcade_input.py *
+SUDO
     sudo chmod 440 "$SUDOERS"
     sudo visudo -c -f "$SUDOERS" || { echo "sudoers syntax error"; exit 1; }
 
     echo "==> Autostart entry"
     mkdir -p ~/.config/autostart
-    cat > ~/.config/autostart/tarcade.desktop <<EOF
+    cat > ~/.config/autostart/tarcade.desktop <<DESK
 [Desktop Entry]
 Type=Application
 Name=T-ARCADE
 Comment=Arcade cabinet front-end
-Exec=$DIR/start_arcade.sh
+Exec=$REPO/scripts/start_arcade.sh
 Terminal=false
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=8
-EOF
-    chmod +x "$DIR/start_arcade.sh"
+DESK
+    chmod +x "$REPO/scripts/start_arcade.sh"
     echo
     echo "Done. The arcade will start on the next login."
-    echo "  disable once : touch $DIR/DISABLE"
+    echo "  disable once : touch $REPO/DISABLE"
     echo "  disable fully: bash $0 --remove"
     echo "  boot log     : $LOG"
     exit 0
@@ -63,14 +71,15 @@ fi
 exec >> "$LOG" 2>&1
 echo "=== $(date) ==="
 
-if [ -f "$DIR/DISABLE" ]; then
+if [ -f "$REPO/DISABLE" ]; then
     echo "DISABLE file present -- not starting."
     exit 0
 fi
 
-# Wait for the compositor to be ready; wlr-randr fails before that.
+# Wait for the compositor. wlr-randr fails before it is up, and the
+# launcher's first act is to disable the HDMI output.
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-for i in $(seq 1 30); do
+for i in $(seq 1 $COMPOSITOR_WAIT); do
     if [ -z "${WAYLAND_DISPLAY:-}" ]; then
         for c in "$XDG_RUNTIME_DIR"/wayland-*; do
             case "$c" in *.lock) continue;; esac
@@ -89,11 +98,11 @@ if ! wlr-randr > /dev/null 2>&1; then
     exit 1
 fi
 
-sleep 3          # let the panel finish coming up
+sleep $PANEL_SETTLE
 
-cd "$DIR" || exit 1
+cd "$REPO" || exit 1
 echo "launching T-ARCADE"
 exec sudo -E \
     XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
     WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
-    /usr/bin/python3 "$DIR/tarcade.py"
+    "$PYTHON" "$SRC/tarcade.py"

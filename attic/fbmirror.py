@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
 """
-fbmirror.py
-===========
+fbmirror.py -- ABANDONED. Kept because the reason it failed is the useful part.
+===============================================================================
 Copies the main framebuffer (/dev/fb0) onto the SPI panel (/dev/fb1).
+
+This does not work under Wayland, and the code is not the reason. Under
+labwc the compositor owns the panel's DRM device (card2) directly; the
+fbdev node /dev/fb1 is an emulated legacy view of it, and writes to it
+land in a shadow buffer that nothing ever scans out. The mirror runs,
+reports a healthy frame rate, and puts pixels nowhere.
+
+The approach that replaced it is in tarcade.py: rather than mirror onto
+the panel, disable the HDMI output so the panel is the only display, and
+let ordinary fullscreen land there. See docs/DEBUGGING.md.
 
 Why this exists: emulators expect a GPU-backed display. The ILI9341 has
 no GPU, so pointing RetroArch at it directly is a fight. Instead, let

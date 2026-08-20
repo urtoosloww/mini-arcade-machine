@@ -4,6 +4,12 @@ arcade_input.py
 ===============
 Joystick + buttons -> virtual keyboard, with a key profile per game.
 
+Why a keyboard and not a gamepad: a virtual gamepad only works once udev
+permissions, the SDL input driver and the emulator's autodetection all
+agree, and each of those fails differently. Every game already reads a
+keyboard. Presenting one removed an entire class of failure -- see
+docs/DEBUGGING.md.
+
 Direction decoding lives in padmap.py, shared with the launcher, so the
 90-degree stick rotation is applied identically everywhere.
 
@@ -17,7 +23,7 @@ Start+Select hold -> force-kills --quit-target
 
 Usage:
     sudo python3 arcade_input.py --profile doom --quit-target chocolate-doom
-    python3 arcade_input.py --test
+    python3 arcade_input.py --test      # no uinput, no root, prints state
 """
 
 import argparse
@@ -26,12 +32,17 @@ import signal
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+for _p in (_HERE, _ROOT):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from smbus2 import SMBus
 from gpiozero import Button, Device
 from evdev import UInput, ecodes as e
 
+import config
 import padmap
 
 PROFILES = {
@@ -48,12 +59,15 @@ PROFILES = {
 DIR_KEYS = {"up": e.KEY_UP, "down": e.KEY_DOWN,
             "left": e.KEY_LEFT, "right": e.KEY_RIGHT}
 
-HOLD_SECS = 2.0
-
 
 def release_gpio():
-    """Fully release the pins. Button.close() alone leaves the lgpio
-    chip handle open at the factory level, so pins stay busy."""
+    """Fully release the pins.
+
+    Button.close() releases the Button but not the pins: gpiozero's lgpio
+    backend keeps the chip handle open at the factory level, and the next
+    process to ask for GPIO5 gets 'GPIO busy'. Closing the factory and
+    dropping the reference is what actually frees them.
+    """
     try:
         if Device.pin_factory is not None:
             Device.pin_factory.close()
@@ -65,25 +79,30 @@ def release_gpio():
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--profile", default="doom", choices=sorted(PROFILES))
-    ap.add_argument("--test", action="store_true")
-    ap.add_argument("--quit-target", default=None, metavar="PROC")
+    ap.add_argument("--test", action="store_true",
+                    help="print decoded state instead of emitting keys")
+    ap.add_argument("--quit-target", default=None, metavar="PROC",
+                    help="process name killed by holding Start+Select")
     args = ap.parse_args()
 
     keymap = PROFILES[args.profile]
-    bus = SMBus(1)
+    bus = SMBus(config.I2C_BUS)
 
     print("Calibrating -- leave the stick alone...")
     ch, cv = padmap.calibrate(bus)
     print(f"center h={ch} v={cv}")
+    if abs(ch - config.ADC_CENTER_EXPECTED_3V3) > 4000:
+        print(f"  note: centre is far from the ~{config.ADC_CENTER_EXPECTED_3V3}"
+              " expected on a 3.3V rail -- check the joystick's VCC")
 
-    btns = {n: Button(p, pull_up=True, bounce_time=0.01)
+    btns = {n: Button(p, pull_up=True, bounce_time=config.BUTTON_BOUNCE_GAME)
             for n, p in padmap.BTN_PINS.items()}
 
     ui = None
     if not args.test:
         caps = sorted(set(list(keymap.values()) + list(DIR_KEYS.values())
                           + [e.KEY_Y, e.KEY_N]))
-        ui = UInput({e.EV_KEY: caps}, name="Trax Arcade Keyboard")
+        ui = UInput({e.EV_KEY: caps}, name="T-Arcade Keyboard")
         print(f"Bridge live [{args.profile}]"
               + (f" quit-target={args.quit_target}" if args.quit_target else ""))
     else:
@@ -107,12 +126,16 @@ def main():
             for n, b in btns.items():
                 s[n] = b.is_pressed
 
-            # --- Start + Select: tap sends Y, hold force-quits
+            # --- Start + Select: tap sends Y, hold force-quits.
+            # Doom asks "quit? (y/n)" and there is no Y button on the
+            # cabinet, so the tap answers it. The hold is the escape
+            # hatch for games that ignore Escape entirely.
             if s["start"] and s["select"]:
                 if combo_since is None:
                     combo_since = time.time()
                     combo_fired = False
-                elif not combo_fired and time.time() - combo_since >= HOLD_SECS:
+                elif (not combo_fired
+                      and time.time() - combo_since >= config.COMBO_HOLD_SECS):
                     if args.quit_target:
                         print(f"\nforce-quitting {args.quit_target}")
                         os.system(f"pkill -TERM -f {args.quit_target} 2>/dev/null")
@@ -136,6 +159,8 @@ def main():
                                sorted(padmap.BTN_PINS)),
                       end="", flush=True)
             else:
+                # Only emit on change: a held direction is one keydown,
+                # not one per poll, or the game sees key repeat storms.
                 dirty = False
                 pairs = [(k, DIR_KEYS[k]) for k in DIR_KEYS]
                 pairs += [(n, keymap[n]) for n in keymap]
@@ -147,7 +172,7 @@ def main():
                     ui.syn()
 
             prev = s
-            time.sleep(0.016)
+            time.sleep(config.INPUT_POLL_INTERVAL)
     finally:
         if ui:
             ui.close()
