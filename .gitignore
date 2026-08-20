@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Autostart escape hatch: `touch DISABLE` stops the arcade at boot.
+DISABLE
+
+# Runtime state and logs
+*.log
+.tarcade_btaudio.json
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
