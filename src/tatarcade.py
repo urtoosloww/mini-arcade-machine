@@ -24,7 +24,7 @@ import time
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import pygame
 from smbus2 import SMBus
-from gpiozero import Button
+from gpiozero import Button, Device
 
 W, H, FPS = 320, 240, 30
 DIR = os.path.dirname(os.path.abspath(__file__))
@@ -88,10 +88,20 @@ class Pad:
             self.btn[name] = Button(pin, pull_up=True, bounce_time=0.02)
 
     def release_pins(self):
-        """Free the GPIO so a game's input bridge can claim it."""
+        """Fully free the GPIO so a game's input bridge can claim it.
+
+        Button.close() is not enough: gpiozero's lgpio backend holds the
+        chip handle at the factory level, leaving the pins busy.
+        """
         for b in self.btn.values():
             b.close()
         self.btn.clear()
+        try:
+            if Device.pin_factory is not None:
+                Device.pin_factory.close()
+        except Exception:
+            pass
+        Device.pin_factory = None
 
     def read(self):
         x = -(self.adc(1) - self.cx) / SPAN
