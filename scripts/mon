@@ -1,0 +1,82 @@
+#!/bin/bash
+# mon -- bring the monitor back on. Type it blind if the screen is dark.
+#
+#     ~/mon          restore the monitor
+#     ~/mon --list   just show current outputs
+#
+# Tries several approaches because "could not apply config" usually means
+# the output name changed, or the compositor rejected a mode-less request.
+
+if ! command -v wlr-randr > /dev/null; then
+    echo "wlr-randr missing; installing..."
+    sudo apt install -y wlr-randr
+fi
+
+# wlr-randr needs the session env; sudo and cron strip it.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+if [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    for c in "$XDG_RUNTIME_DIR"/wayland-*; do
+        case "$c" in *.lock) continue;; esac
+        [ -S "$c" ] && export WAYLAND_DISPLAY="$(basename "$c")" && break
+    done
+fi
+
+RAW=$(wlr-randr 2>&1)
+if echo "$RAW" | grep -qi "failed to connect"; then
+    echo "Cannot reach the compositor."
+    echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR  WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-unset}"
+    echo "Run this from a terminal inside your desktop session."
+    exit 1
+fi
+
+OUTS=$(echo "$RAW" | grep -E '^[A-Za-z]' | awk '{print $1}')
+
+if [ "${1:-}" = "--list" ]; then
+    echo "$RAW"
+    exit 0
+fi
+
+echo "outputs: $(echo $OUTS)"
+
+restored=0
+for o in $OUTS; do
+    case "$o" in *SPI*|*spi*) continue ;; esac
+
+    # 1. plain enable
+    if wlr-randr --output "$o" --on 2>/dev/null; then
+        echo "  $o on"
+        restored=1
+        continue
+    fi
+
+    # 2. enable with its preferred mode (some compositors need one)
+    MODE=$(echo "$RAW" | awk -v out="$o" '
+        $1 == out {found=1; next}
+        found && /preferred/ {print $1; exit}
+        found && /^[A-Za-z]/ {exit}')
+    if [ -n "$MODE" ] && wlr-randr --output "$o" --on --mode "$MODE" 2>/dev/null; then
+        echo "  $o on at $MODE"
+        restored=1
+        continue
+    fi
+
+    # 3. enable and place at the origin
+    if wlr-randr --output "$o" --on --pos 0,0 2>/dev/null; then
+        echo "  $o on at 0,0"
+        restored=1
+        continue
+    fi
+
+    echo "  $o FAILED"
+done
+
+if [ "$restored" = "0" ]; then
+    echo
+    echo "Nothing came back. Last resorts, in order:"
+    echo "  1. wlr-randr                      (see what exists)"
+    echo "  2. Ctrl+Alt+F2                    (fresh console)"
+    echo "  3. sudo systemctl restart display-manager"
+    exit 1
+fi
+
+echo "done"
